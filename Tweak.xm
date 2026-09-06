@@ -1,8 +1,9 @@
+#import <UIKit/UIKit.h>
+#import <CoreGraphics/CoreGraphics.h>
+
 %hook CCLiquidGlassView
 
 // ============ 核心: 液态玻璃构建入口 ============
-// 签名: v100@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48B80q84d92
-// displacementFactor (d92) 传 0 → 玻璃透明无液态效果
 - (void)cc_dispatchGlassBuildWithTextRect:(CGRect)textRect
                                canvasRect:(CGRect)canvasRect
                                    isDark:(BOOL)isDark
@@ -58,14 +59,6 @@
     if (displacementFactor <= 0.0) {
         displacementFactor = 1.0;
     }
-    %orig;
-}
-
-- (void)cc_applyGlassFillAppearance {
-    %orig;
-}
-
-- (void)cc_applyGlassRefractionStrength {
     %orig;
 }
 
