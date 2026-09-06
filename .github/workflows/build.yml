@@ -51,6 +51,24 @@ jobs:
           make package || make
           ls -la packages/ 2>/dev/null || echo "no packages dir"
 
+      - name: Repoint CydiaSubstrate dependency
+        run: |
+          # roothide 环境没有 CydiaSubstrate.framework, dyld 拒载
+          # 把依赖改指到手机上真实存在的 libsubstrate.dylib (ellekit shim)
+          set -e
+          DYLIB=$(find .theos/obj -name "LiquidifyUnlock.dylib" | head -1)
+          echo "dylib: $DYLIB"
+          otool -L "$DYLIB" | head -12
+          install_name_tool -change @rpath/CydiaSubstrate.framework/CydiaSubstrate /var/jb/usr/lib/libsubstrate.dylib "$DYLIB"
+          ldid -S "$DYLIB"
+          echo "--- after ---"
+          otool -L "$DYLIB" | head -12
+          # 重新打包 deb
+          export THEOS=/tmp/theos
+          export PATH=$THEOS/bin:$PATH
+          make package
+          ls -la packages/
+
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
         with:
