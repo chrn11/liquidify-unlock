@@ -1,0 +1,30 @@
+name: Build iOS Tweak
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: theos/theos-action@v1
+
+      - name: Build
+        run: |
+          make clean || true
+          make package
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiquidifyUnlock-deb
+          path: |
+            packages/*.deb
+            .theos/obj/*.dylib
+        if: always()

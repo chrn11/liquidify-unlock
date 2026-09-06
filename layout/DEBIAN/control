@@ -1,0 +1,9 @@
+Package: com.minis.liquidifyunlock
+Name: LiquidifyUnlock
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: Hook Liquidify CCLiquidGlassView 核心方法强制液态玻璃生效
+Maintainer: Minis
+Author: Minis
+Section: Tweaks
+Depends: mobilesubstrate
