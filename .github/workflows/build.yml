@@ -30,6 +30,13 @@ jobs:
           curl -sL -o /tmp/iPhoneOS.sdk.tar.xz "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
           ls -la /tmp/iPhoneOS.sdk.tar.xz
 
+      - name: Install ldid
+        run: |
+          # Theos 构建后需要用 ldid 签名 - 用 Homebrew 安装
+          brew install ldid 2>&1 | tail -3 || true
+          which ldid || sudo ln -s $(brew --prefix)/bin/ldid /usr/local/bin/ldid || true
+          ldid 2>&1 | head -2 || echo "check"
+
       - name: Build
         run: |
           export THEOS=/tmp/theos
