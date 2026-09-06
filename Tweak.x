@@ -4,6 +4,7 @@
 #import <mach-o/loader.h>
 #import <sys/mman.h>
 #import <unistd.h>
+#import <libkern/OSCacheControl.h>
 #import <stdint.h>
 #include <string.h>
 
@@ -130,8 +131,8 @@ static BOOL LQPatchLiquidifyImage(const struct mach_header *header,
     // machine table is modified.
     *qWord = kQPatch;
     *cWord = kCPatch;
-    __builtin___clear_cache((char *)qAddress, (char *)(qAddress + 4));
-    __builtin___clear_cache((char *)cAddress, (char *)(cAddress + 4));
+    sys_icache_invalidate((void *)qAddress, sizeof(uint32_t));
+    sys_icache_invalidate((void *)cAddress, sizeof(uint32_t));
 
     LQRestorePageExecutable(qPage, pageSize);
     if (cPage != qPage) {
