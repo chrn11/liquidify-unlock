@@ -3,7 +3,7 @@ ARCHS = arm64 arm64e
 INSTALL_TARGET_PROCESSES = SpringBoard
 
 # roothide/rootless 支持
-THEOS_PACKAGE_SCHEME = rootless
+THEOS_PACKAGE_SCHEME = roothide
 
 include $(THEOS)/makefiles/common.mk
 
