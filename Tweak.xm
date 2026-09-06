@@ -1,34 +1,31 @@
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 
-// Safe value-override hooks based on 2026-09-06 reverse engineering.
-// Root cause: DRM/pref layer feeds 0 -> gates judge 0 -> skip liquid conversion -> transparent.
-// Strategy: only override return values of getters; void methods pass through %orig.
+// ============ 诊断版: 全方法参数日志 ============
+// 目标: 搞清 SpringBoard/widget 进程里哪些方法被调、参数是什么、DRM 把什么清零了
 
-static double LQFallbackDisplacement = 16.0; // plugin's own default (FMOV D0,#16.0)
-static double LQMinOpacity = 0.55;
+static int LQCallCount = 0;
 
 %hook CCLiquidGlassLabel
 
-// Displacement gate (0x591a54 b.le): compares cached value vs new pref value.
-// DRM zeroes pref AND cache -> diff 0 -> dispatchGlassBuild always skipped.
-// Hook: return 16.0 when cache < 1.0 -> diff always > epsilon -> build always runs.
 - (double)cachedDisplacementFactor {
     double v = %orig;
+    NSLog(@"[LQ] Label.cachedDisplacementFactor = %f", v);
     if (v < 1.0) {
-        return LQFallbackDisplacement;
+        return 16.0;
     }
     return v;
 }
 
-// Main liquid conversion entry: force default displacement when zeroed by DRM.
 - (void)cc_dispatchGlassBuildWithTextRect:(CGRect)textRect
                                canvasRect:(CGRect)canvasRect
                                    isDark:(BOOL)isDark
                                     style:(NSInteger)style
                        displacementFactor:(double)displacementFactor {
+    NSLog(@"[LQ] Label.dispatchGlassBuild df=%f isDark=%d style=%ld", displacementFactor, isDark, (long)style);
     if (displacementFactor <= 0.5) {
-        displacementFactor = LQFallbackDisplacement;
+        displacementFactor = 16.0;
+        NSLog(@"[LQ]   -> df forced to 16.0");
     }
     %orig;
 }
@@ -37,43 +34,53 @@ static double LQMinOpacity = 0.55;
 
 %hook CCLiquidGlassView
 
-// Q-point internal gate: fill pipeline blocked by cachedShellPrepared == 0.
 - (BOOL)cachedShellPrepared {
+    BOOL v = %orig;
+    NSLog(@"[LQ] View.cachedShellPrepared = %d", v);
     return YES;
 }
 
-// C-point internal gate: refraction pipeline blocked by cachedMeshEnabled == 0.
 - (BOOL)cachedMeshEnabled {
+    BOOL v = %orig;
+    NSLog(@"[LQ] View.cachedMeshEnabled = %d", v);
     return YES;
 }
 
-// Fill color fallback when DRM returns nil.
 - (UIColor *)cc_currentGlassFillColor {
-    UIColor *color = %orig;
-    if (!color) {
-        color = [UIColor colorWithWhite:1.0 alpha:0.12];
+    UIColor *c = %orig;
+    NSLog(@"[LQ] View.currentGlassFillColor = %@", c);
+    if (!c) {
+        c = [UIColor colorWithWhite:1.0 alpha:0.12];
     }
-    return color;
+    return c;
 }
 
-// FrostedGlassOpacity default is 0.0 (movi d0,#0) - the direct "always transparent" source.
 - (void)cc_applyFrostedBackdropOpacity:(double)opacity {
+    NSLog(@"[LQ] View.applyFrostedBackdropOpacity = %f", opacity);
     if (opacity < 0.1) {
-        opacity = LQMinOpacity;
+        opacity = 0.55;
+        NSLog(@"[LQ]   -> opacity forced to 0.55");
     }
     %orig;
 }
 
-// Final conversion methods called at Q/C points: gates opened above, pass through.
 - (void)cc_applyGlassFillAppearance {
+    LQCallCount++;
+    if (LQCallCount <= 20) NSLog(@"[LQ] View.applyGlassFillAppearance #%d", LQCallCount);
     %orig;
 }
 
 - (void)cc_applyGlassRefractionStrength {
+    static int n = 0;
+    n++;
+    if (n <= 20) NSLog(@"[LQ] View.applyGlassRefractionStrength #%d", n);
     %orig;
 }
 
 - (void)cc_applyBackdropBlurRadius {
+    static int n = 0;
+    n++;
+    if (n <= 20) NSLog(@"[LQ] View.applyBackdropBlurRadius #%d", n);
     %orig;
 }
 
@@ -81,11 +88,7 @@ static double LQMinOpacity = 0.55;
 
 %ctor {
     @autoreleasepool {
-        // marker to verify loading
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-        NSString *status = [NSString stringWithFormat:@"loaded %@", bid];
-        [status writeToFile:@"/var/mobile/Documents/liquidify_unlock_status.txt"
-                atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSLog(@"[LiquidifyUnlock] DIAG ctor in %@", bid);
     }
-    NSLog(@"[LiquidifyUnlock] Loaded");
 }

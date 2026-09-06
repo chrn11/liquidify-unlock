@@ -1,78 +1,48 @@
-name: Build iOS Tweak
+name: Build LiquidifyUnlock deb (roothide)
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Theos
+      - name: Install Theos (roothide fork)
         run: |
-          git clone --recursive https://github.com/theos/theos.git /tmp/theos
-          export THEOS=/tmp/theos
-          echo "THEOS=/tmp/theos" >> $GITHUB_ENV
-          echo "$THEOS/bin" >> $GITHUB_PATH
-          # 下载 SDK (Theos 官方 sdk 都在这)
-          ls /tmp/theos/sdks/ || true
-          echo "--- 查看 Xcode SDK ---"
-          xcodebuild -showsdks 2>/dev/null | grep -i iphone || echo "no xcode sdk listed"
-
-      - name: Download iPhoneOS SDK
-        run: |
-          # Theos 官方 SDK 仓库正确 URL
-          cd /tmp/theos
-          curl -sL -o /tmp/iPhoneOS.sdk.tar.xz "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
-          ls -la /tmp/iPhoneOS.sdk.tar.xz
-
-      - name: Install ldid
-        run: |
-          # Theos 构建后需要用 ldid 签名 - 用 Homebrew 安装
-          brew install ldid 2>&1 | tail -3 || true
-          which ldid || sudo ln -s $(brew --prefix)/bin/ldid /usr/local/bin/ldid || true
-          ldid 2>&1 | head -2 || echo "check"
-
-      - name: Build
-        run: |
-          export THEOS=/tmp/theos
-          export PATH=$THEOS/bin:$PATH
-          # 解压 SDK
-          mkdir -p $THEOS/sdks
-          if [ -f /tmp/iPhoneOS.sdk.tar.xz ]; then
-            tar -xJf /tmp/iPhoneOS.sdk.tar.xz -C $THEOS/sdks/
-            ls $THEOS/sdks/
+          set -euo pipefail
+          export THEOS="$HOME/theos"
+          if [[ ! -d "$THEOS" ]]; then
+            git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
           fi
-          make clean || true
-          make package || make
-          ls -la packages/ 2>/dev/null || echo "no packages dir"
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
 
-      - name: Repoint CydiaSubstrate dependency
+      - name: Install deps
         run: |
-          # roothide: 无 CydiaSubstrate 框架; 且 ID 必须可解析 (@rpath 在注入环境无 rpath)
-          # 全部在 runner 上做完 + ldid 签名, 产物即用
-          set -e
-          DYLIB=$(find .theos/obj -name "LiquidifyUnlock.dylib" | head -1)
-          echo "dylib: $DYLIB"
-          install_name_tool -change @rpath/CydiaSubstrate.framework/CydiaSubstrate /var/jb/usr/lib/libsubstrate.dylib "$DYLIB"
-          # 短 ID: @loader_path/LLUnlock.dylib (装到哪都自解析; 原 @rpath 名字 32B 空间塞不下长名)
-          install_name_tool -id @loader_path/LLUnlock.dylib "$DYLIB"
-          ldid -S "$DYLIB"
-          echo "--- final deps ---"
-          otool -L "$DYLIB" | head -12
-          echo "--- final id ---"
-          otool -D "$DYLIB"
-          cp "$DYLIB" LiquidifyUnlock-patched.dylib
+          brew install dpkg ldid
 
-      - name: Upload deb artifact
+      - name: Build roothide deb
+        run: |
+          set -euo pipefail
+          make clean package FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=roothide \
+            PACKAGE_VERSION=2.1.0-${{ github.run_number }}
+
+      - name: Collect
+        run: |
+          mkdir -p output
+          cp packages/*.deb output/ || cp .theos/packages/*.deb output/ 2>/dev/null || find . -name "*.deb" -exec cp {} output/ \;
+          ls -lh output/
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LiquidifyUnlock-deb
-          path: |
-            packages/*.deb
-            LiquidifyUnlock-patched.dylib
-        if: always()
+          name: LiquidifyUnlock-roothide-deb
+          path: output/*.deb
+          retention-days: 30
