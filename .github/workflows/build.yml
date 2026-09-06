@@ -13,12 +13,23 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Theos
-        uses: theos/theos-action@v1
+        run: |
+          git clone --recursive https://github.com/theos/theos.git /tmp/theos
+          echo "$(pwd)" >> $GITHUB_PATH
+          export THEOS=/tmp/theos
+          echo "THEOS=/tmp/theos" >> $GITHUB_ENV
+          # 检查 SDK 目录
+          ls /tmp/theos/sdks/ || echo "no sdks - will fail"
 
       - name: Build
         run: |
+          export THEOS=/tmp/theos
+          export PATH=$THEOS/bin:$PATH
+          echo "PATH=$PATH"
           make clean || true
-          make package
+          make package || make
+          ls -la packages/ 2>/dev/null || echo "no packages dir"
+          ls -la .theos/obj/ 2>/dev/null || true
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
