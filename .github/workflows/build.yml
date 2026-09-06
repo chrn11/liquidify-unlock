@@ -25,10 +25,10 @@ jobs:
 
       - name: Download iPhoneOS SDK
         run: |
-          # Theos install-sdk 脚本自动下载
+          # Theos 官方 SDK 仓库正确 URL
           cd /tmp/theos
-          # 先试官方 sdk 下载
-          curl -sL -o /tmp/iPhoneOS.sdk.tar.xz "https://github.com/theos/sdks/releases/download/16.0/iPhoneOS16.0.sdk.tar.xz" && ls -la /tmp/iPhoneOS.sdk.tar.xz || echo "sdk download test"
+          curl -sL -o /tmp/iPhoneOS.sdk.tar.xz "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
+          ls -la /tmp/iPhoneOS.sdk.tar.xz
 
       - name: Build
         run: |
