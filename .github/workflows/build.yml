@@ -15,21 +15,34 @@ jobs:
       - name: Setup Theos
         run: |
           git clone --recursive https://github.com/theos/theos.git /tmp/theos
-          echo "$(pwd)" >> $GITHUB_PATH
           export THEOS=/tmp/theos
           echo "THEOS=/tmp/theos" >> $GITHUB_ENV
-          # 检查 SDK 目录
-          ls /tmp/theos/sdks/ || echo "no sdks - will fail"
+          echo "$THEOS/bin" >> $GITHUB_PATH
+          # 下载 SDK (Theos 官方 sdk 都在这)
+          ls /tmp/theos/sdks/ || true
+          echo "--- 查看 Xcode SDK ---"
+          xcodebuild -showsdks 2>/dev/null | grep -i iphone || echo "no xcode sdk listed"
+
+      - name: Download iPhoneOS SDK
+        run: |
+          # Theos install-sdk 脚本自动下载
+          cd /tmp/theos
+          # 先试官方 sdk 下载
+          curl -sL -o /tmp/iPhoneOS.sdk.tar.xz "https://github.com/theos/sdks/releases/download/16.0/iPhoneOS16.0.sdk.tar.xz" && ls -la /tmp/iPhoneOS.sdk.tar.xz || echo "sdk download test"
 
       - name: Build
         run: |
           export THEOS=/tmp/theos
           export PATH=$THEOS/bin:$PATH
-          echo "PATH=$PATH"
+          # 解压 SDK
+          mkdir -p $THEOS/sdks
+          if [ -f /tmp/iPhoneOS.sdk.tar.xz ]; then
+            tar -xJf /tmp/iPhoneOS.sdk.tar.xz -C $THEOS/sdks/
+            ls $THEOS/sdks/
+          fi
           make clean || true
           make package || make
           ls -la packages/ 2>/dev/null || echo "no packages dir"
-          ls -la .theos/obj/ 2>/dev/null || true
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
