@@ -55,6 +55,7 @@ jobs:
         run: |
           # roothide 环境没有 CydiaSubstrate.framework, dyld 拒载
           # 把依赖改指到手机上真实存在的 libsubstrate.dylib (ellekit shim)
+          # 注意: patch 后不可再 make (会重链接抹掉补丁), deb 在本地用此 dylib 组装
           set -e
           DYLIB=$(find .theos/obj -name "LiquidifyUnlock.dylib" | head -1)
           echo "dylib: $DYLIB"
@@ -63,11 +64,7 @@ jobs:
           ldid -S "$DYLIB"
           echo "--- after ---"
           otool -L "$DYLIB" | head -12
-          # 重新打包 deb
-          export THEOS=/tmp/theos
-          export PATH=$THEOS/bin:$PATH
-          make package
-          ls -la packages/
+          cp "$DYLIB" LiquidifyUnlock-patched.dylib
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
@@ -75,5 +72,5 @@ jobs:
           name: LiquidifyUnlock-deb
           path: |
             packages/*.deb
-            .theos/obj/*.dylib
+            LiquidifyUnlock-patched.dylib
         if: always()
