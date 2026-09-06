@@ -65,5 +65,10 @@
 %end
 
 %ctor {
+    @autoreleasepool {
+        // marker 验证加载
+        NSString *status = @"loaded";
+        [status writeToFile:@"/var/mobile/Documents/liquidify_unlock_status.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
     NSLog(@"[LiquidifyUnlock] Loaded");
 }
