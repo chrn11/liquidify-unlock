@@ -17,8 +17,12 @@ static const uintptr_t kQOffset = 0x30044c;
 static const uintptr_t kCOffset = 0x30165c;
 static const uint32_t kQOriginal = 0x1a9f97f5;
 static const uint32_t kCOriginal = 0x1a9f27e8;
+// CFG-traced polarity (OLLVM dispatch tables resolved):
+//   Q == 1 -> block 0x3003f4 executes cc_applyGlassFillAppearance (x2)
+//   C == 0 -> block 0x301678 executes cc_applyBackdropBlurRadius + cc_applyGlassRefractionStrength
+//   C == 1 -> block 0x301664 skips both. So C must be forced to 0, not 1.
 static const uint32_t kQPatch = 0x52800035; // mov w21, #1
-static const uint32_t kCPatch = 0x52800028; // mov w8, #1
+static const uint32_t kCPatch = 0x52800008; // mov w8, #0
 
 static void LQLog(NSString *message) {
     NSLog(@"[LiquidifyUnlock] %@", message);
