@@ -17,7 +17,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq dpkg ldid xz-utils fakeroot
+          sudo apt-get install -y -qq dpkg xz-utils fakeroot
 
       - name: Stage full-crack package (roothide native)
         run: |
