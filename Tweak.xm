@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <fcntl.h>
 extern "C" Ivar *class_copyIvarList(Class cls, unsigned int *outCount);
 
 
@@ -39,6 +40,7 @@ static double LQPrefDouble(NSString *key, double fallback) {
         }
     }
     if (ivars) free(ivars);
+    LQReport("Q-fill", object_getClass(self), self);
     %orig;
 }
 
@@ -58,6 +60,7 @@ static double LQPrefDouble(NSString *key, double fallback) {
         }
     }
     if (ivars) free(ivars);
+    LQReport("C-refr", object_getClass(self), self);
     %orig;
 }
 
@@ -76,13 +79,54 @@ static double LQPrefDouble(NSString *key, double fallback) {
         }
     }
     if (ivars) free(ivars);
+    LQReport("C-blur", object_getClass(self), self);
     %orig;
 }
 
 %end
 
+static int LQReportCount = 0;
+static void LQReport(const char *tag, Class cls, id selfObj) {
+    if (cls && ++LQReportCount > 30) return; // 前30次调用记录, 之后静默
+
+    // 低级写文件 (绕过 NSString 静默失败)
+    int fd = open("/var/mobile/Documents/lq_verify.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (fd < 0) return;
+    char buf[512];
+    if (cls && selfObj) {
+        int n = snprintf(buf, sizeof(buf), "[%s] %@ ivars:\n", tag, NSStringFromClass(cls));
+        write(fd, buf, n);
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            const char *name = ivar_getName(ivars[i]);
+            ptrdiff_t off = (ptrdiff_t)ivar_getOffset(ivars[i]);
+            if (type && type[0] == 'd') {
+                double v = *(double *)((uint8_t *)(__bridge void *)selfObj + off);
+                n = snprintf(buf, sizeof(buf), "  d %s +%td = %f\n", name ? name : "?", off, v);
+                write(fd, buf, n);
+            } else if (type && type[0] == 'B') {
+                BOOL v = *(BOOL *)((uint8_t *)(__bridge void *)selfObj + off);
+                n = snprintf(buf, sizeof(buf), "  B %s +%td = %d\n", name ? name : "?", off, v);
+                write(fd, buf, n);
+            } else if (type && type[0] == '@') {
+                id v = *(id *)((uint8_t *)(__bridge void *)selfObj + off);
+                n = snprintf(buf, sizeof(buf), "  @ %s +%td = %@\n", name ? name : "?", off, v ? NSStringFromClass([v class]) : @"nil");
+                write(fd, buf, n);
+            }
+        }
+        if (ivars) free(ivars);
+    } else {
+        int n = snprintf(buf, sizeof(buf), "[%s] loaded\n", tag);
+        write(fd, buf, n);
+    }
+    close(fd);
+}
+
 %ctor {
     @autoreleasepool {
+        LQReport("ctor", nil, nil);
         NSLog(@"[LiquidifyUnlock] QC ivar-fill tweak loaded");
     }
 }
