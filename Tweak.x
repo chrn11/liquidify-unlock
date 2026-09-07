@@ -157,7 +157,7 @@ static void LQImageAdded(const struct mach_header *header, intptr_t slide) {
 
 __attribute__((constructor)) static void LQInit(void) {
     @autoreleasepool {
-        LQLog(@"tweak loaded (5-point)");
+        LQLog(@"tweak loaded (7-point)");
         _dyld_register_func_for_add_image(LQImageAdded);
         LQTryPatch();
     }
