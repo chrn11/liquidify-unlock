@@ -8,174 +8,140 @@
 #import <stdint.h>
 #include <string.h>
 
-// Runtime-only patch. The installed Liquidify.dylib is never modified on disk.
-// These are the verified arm64e Q/C points in Liquidify 1.3.7-4:
-//   Q 0x30044c: cset w21, hi -> mov w21, #1
-//   C 0x30165c: cset w8, lo  -> mov w8, #1
+// LiquidifyUnlock — runtime tweak for Liquidify 1.3.7-4 (arm64e).
+// Disk file is never modified. Five verified, non-looping patch points:
+//
+//  0x2b4c68  csel w8,w13,w8,ne  -> orr w8,wzr,w13   SetA fill: cachedShellPrepared gate -> always K_true
+//  0x2acef4  csel w8,w9, w8,ne  -> orr w8,wzr,w9    SetA refr: cachedMeshEnabled   gate -> always K_true
+//  0x7169c4  cset w8,eq         -> mov w8,#1        DRM1: signature-verified flag forced true
+//  0x7e7190  strb w0,[x19,#5]   -> strb wzr,[x19,#5] DRM2: OSStatus forced 0 (success)
+//  0x591a54  b.le 0x591ad4      -> nop               Label gate: never skip cc_dispatchGlassBuild
+//
+// Q(0x30044c)/C(0x30165c) are deliberately NOT touched: Q is mathematically
+// constant 0 (umull>>50 caps at ~32 vs 0xb631a05e) and forcing either sends the
+// OLLVM dispatcher into an infinite self-loop (the earlier black screen).
 
-static const uintptr_t kQOffset = 0x30044c;
-static const uintptr_t kCOffset = 0x30165c;
-static const uint32_t kQOriginal = 0x1a9f97f5;
-static const uint32_t kCOriginal = 0x1a9f27e8;
-// CFG-traced polarity (OLLVM dispatch tables resolved):
-//   Q == 1 -> block 0x3003f4 executes cc_applyGlassFillAppearance (x2)
-//   C == 0 -> block 0x301678 executes cc_applyBackdropBlurRadius + cc_applyGlassRefractionStrength
-//   C == 1 -> block 0x301664 skips both. So C must be forced to 0, not 1.
-static const uint32_t kQPatch = 0x52800035; // mov w21, #1
-static const uint32_t kCPatch = 0x52800008; // mov w8, #0
+typedef struct {
+    uintptr_t offset;
+    uint32_t expect;   // original instruction word, strict check
+    uint32_t patch;    // replacement word
+} LQPatch;
+
+static const LQPatch kPatches[] = {
+    { 0x2b4c68, 0x1a8811a8, 0x2a0d03e8 },
+    { 0x2acef4, 0x1a881128, 0x2a0903e8 },
+    { 0x7169c4, 0x1a9f17e8, 0x52800028 },
+    { 0x7e7190, 0x39001660, 0x3900167f },
+    { 0x591a54, 0x5400040d, 0xd503201f },
+};
+static const size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
 static void LQLog(NSString *message) {
     NSLog(@"[LiquidifyUnlock] %@", message);
 }
 
-static BOOL LQMakePageWritable(uintptr_t page, size_t pageSize) {
-    kern_return_t kr = vm_protect(mach_task_self(),
-                                  (vm_address_t)page,
-                                  (vm_size_t)pageSize,
-                                  FALSE,
+static BOOL LQMakeWritable(uintptr_t page, size_t pageSize) {
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page,
+                                  (vm_size_t)pageSize, FALSE,
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr == KERN_SUCCESS) {
-        return YES;
-    }
-
-    // Fallback for jailbreaks which expose mprotect instead of writable VM pages.
+    if (kr == KERN_SUCCESS) return YES;
     return mprotect((void *)page, pageSize,
                     PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
 }
 
-static void LQRestorePageExecutable(uintptr_t page, size_t pageSize) {
-    vm_protect(mach_task_self(),
-               (vm_address_t)page,
-               (vm_size_t)pageSize,
-               FALSE,
-               VM_PROT_READ | VM_PROT_EXECUTE);
-    // Ignore mprotect failure: vm_protect is the normal iOS path.
+static void LQRestoreExec(uintptr_t page, size_t pageSize) {
+    vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)pageSize,
+               FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
 static BOOL LQPatchLiquidifyImage(const struct mach_header *header,
-                                  intptr_t slide,
-                                  const char *imageName) {
-    if (!header || header->magic != MH_MAGIC_64 || !imageName) {
-        return NO;
-    }
+                                  intptr_t slide, const char *imageName) {
+    if (!header || header->magic != MH_MAGIC_64 || !imageName) return NO;
 
-    const struct mach_header_64 *machHeader =
-        (const struct mach_header_64 *)header;
+    const struct mach_header_64 *h = (const struct mach_header_64 *)header;
     const uint8_t *cursor = (const uint8_t *)header + sizeof(struct mach_header_64);
-    const struct segment_command_64 *textSegment = NULL;
-
-    for (uint32_t i = 0; i < machHeader->ncmds; i++) {
-        const struct load_command *command =
-            (const struct load_command *)cursor;
-        if (command->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *segment =
+    const struct segment_command_64 *text = NULL;
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+        const struct load_command *cmd = (const struct load_command *)cursor;
+        if (cmd->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg =
                 (const struct segment_command_64 *)cursor;
-            if (strcmp(segment->segname, "__TEXT") == 0) {
-                textSegment = segment;
-            }
+            if (strcmp(seg->segname, "__TEXT") == 0) text = seg;
         }
-        cursor += command->cmdsize;
+        cursor += cmd->cmdsize;
     }
+    if (!text) return NO;
 
-    if (!textSegment) {
-        LQLog([NSString stringWithFormat:@"no __TEXT segment in %s", imageName]);
-        return NO;
-    }
+    uintptr_t base = (uintptr_t)header - (uintptr_t)text->vmaddr;
+    uintptr_t textStart = base + (uintptr_t)text->vmaddr;
+    uintptr_t textEnd = textStart + (uintptr_t)text->vmsize;
 
-    // The addresses above are image VM addresses. Derive the image base rather
-    // than assuming a particular ASLR slide or a particular mapped path.
-    uintptr_t imageBase = (uintptr_t)header - (uintptr_t)textSegment->vmaddr;
-    uintptr_t qAddress = imageBase + kQOffset;
-    uintptr_t cAddress = imageBase + kCOffset;
-
-    uintptr_t textStart = imageBase + (uintptr_t)textSegment->vmaddr;
-    uintptr_t textEnd = textStart + (uintptr_t)textSegment->vmsize;
-    if (qAddress < textStart || cAddress < textStart ||
-        qAddress + sizeof(uint32_t) > textEnd ||
-        cAddress + sizeof(uint32_t) > textEnd) {
-        LQLog([NSString stringWithFormat:@"Q/C outside __TEXT in %s (slide=%p)",
-               imageName, (void *)slide]);
-        return NO;
-    }
-
-    uint32_t *qWord = (uint32_t *)qAddress;
-    uint32_t *cWord = (uint32_t *)cAddress;
-    uint32_t qCurrent = *qWord;
-    uint32_t cCurrent = *cWord;
-
-    // Idempotent: a second image-add callback must not write again.
-    if (qCurrent == kQPatch && cCurrent == kCPatch) {
-        LQLog([NSString stringWithFormat:@"Q/C already patched in %s", imageName]);
-        return YES;
-    }
-
-    // Never touch an unexpected image version. This is deliberately strict.
-    if (qCurrent != kQOriginal || cCurrent != kCOriginal) {
-        LQLog([NSString stringWithFormat:
-               @"Q/C signature mismatch in %s: Q=%08x C=%08x",
-               imageName, qCurrent, cCurrent]);
-        return NO;
+    // Strict pre-check of every original word on this image.
+    for (size_t i = 0; i < kPatchCount; i++) {
+        uintptr_t a = base + kPatches[i].offset;
+        if (a < textStart || a + 4 > textEnd) return NO;
+        uint32_t cur = *(uint32_t *)a;
+        if (cur == kPatches[i].patch) {
+            // Already applied (idempotent re-entry).
+            continue;
+        }
+        if (cur != kPatches[i].expect) {
+            LQLog([NSString stringWithFormat:
+                   @"mismatch @%p: %08x != %08x (%s)",
+                   (void *)a, cur, kPatches[i].expect, imageName]);
+            return NO;
+        }
     }
 
     size_t pageSize = (size_t)getpagesize();
-    uintptr_t qPage = qAddress & ~(uintptr_t)(pageSize - 1);
-    uintptr_t cPage = cAddress & ~(uintptr_t)(pageSize - 1);
-
-    if (!LQMakePageWritable(qPage, pageSize)) {
-        LQLog(@"cannot make Q page writable");
-        return NO;
+    uintptr_t pages[8];
+    size_t pageCount = 0;
+    for (size_t i = 0; i < kPatchCount && pageCount < 8; i++) {
+        uintptr_t p = (base + kPatches[i].offset) & ~(uintptr_t)(pageSize - 1);
+        BOOL dup = NO;
+        for (size_t j = 0; j < pageCount; j++) if (pages[j] == p) dup = YES;
+        if (!dup) pages[pageCount++] = p;
     }
-    if (cPage != qPage && !LQMakePageWritable(cPage, pageSize)) {
-        LQRestorePageExecutable(qPage, pageSize);
-        LQLog(@"cannot make C page writable");
-        return NO;
+    for (size_t j = 0; j < pageCount; j++) {
+        if (!LQMakeWritable(pages[j], pageSize)) {
+            LQLog(@"page not writable");
+            return NO;
+        }
     }
 
-    // Only these two instruction words are changed; no branch target or state
-    // machine table is modified.
-    *qWord = kQPatch;
-    *cWord = kCPatch;
-    sys_icache_invalidate((void *)qAddress, sizeof(uint32_t));
-    sys_icache_invalidate((void *)cAddress, sizeof(uint32_t));
-
-    LQRestorePageExecutable(qPage, pageSize);
-    if (cPage != qPage) {
-        LQRestorePageExecutable(cPage, pageSize);
+    int applied = 0;
+    for (size_t i = 0; i < kPatchCount; i++) {
+        uintptr_t a = base + kPatches[i].offset;
+        if (*(uint32_t *)a == kPatches[i].patch) continue;
+        *(uint32_t *)a = kPatches[i].patch;
+        sys_icache_invalidate((void *)a, sizeof(uint32_t));
+        applied++;
     }
+
+    for (size_t j = 0; j < pageCount; j++) LQRestoreExec(pages[j], pageSize);
 
     LQLog([NSString stringWithFormat:
-           @"Q/C patched in %s (Q=%p C=%p slide=%p)",
-           imageName, (void *)qAddress, (void *)cAddress, (void *)slide]);
+           @"patched %d/%zu sites in %s (base=%p slide=%p)",
+           applied, kPatchCount, imageName, (void *)base, (void *)slide]);
     return YES;
 }
 
-static void LQScanAndPatch(void) {
-    uint32_t imageCount = _dyld_image_count();
-    for (uint32_t i = 0; i < imageCount; i++) {
+static void LQTryPatch(void) {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
-        if (!name || !strstr(name, "/Liquidify.dylib")) {
-            continue;
-        }
-
-        const struct mach_header *header = _dyld_get_image_header(i);
+        if (!name || !strstr(name, "/Liquidify.dylib")) continue;
+        const struct mach_header *mh = _dyld_get_image_header(i);
         intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        if (LQPatchLiquidifyImage(header, slide, name)) {
-            return;
-        }
+        if (LQPatchLiquidifyImage(mh, slide, name)) return;
     }
 }
 
 static void LQImageAdded(const struct mach_header *header, intptr_t slide) {
-    if (!header) {
-        return;
-    }
-
-    // Locate the matching image by header. The callback does not provide a path.
-    uint32_t imageCount = _dyld_image_count();
-    for (uint32_t i = 0; i < imageCount; i++) {
-        if (_dyld_get_image_header(i) != header) {
-            continue;
-        }
+    if (!header) return;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        if (_dyld_get_image_header(i) != header) continue;
         const char *name = _dyld_get_image_name(i);
         if (name && strstr(name, "/Liquidify.dylib")) {
             LQPatchLiquidifyImage(header, slide, name);
@@ -186,10 +152,8 @@ static void LQImageAdded(const struct mach_header *header, intptr_t slide) {
 
 __attribute__((constructor)) static void LQInit(void) {
     @autoreleasepool {
-        LQLog(@"runtime Q/C tweak loaded");
-        // This also invokes the callback for images already loaded.
+        LQLog(@"tweak loaded (5-point)");
         _dyld_register_func_for_add_image(LQImageAdded);
-        // Keep an explicit scan for loaders which register callbacks late.
-        LQScanAndPatch();
+        LQTryPatch();
     }
 }
