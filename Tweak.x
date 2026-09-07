@@ -1,174 +1,110 @@
 #import <Foundation/Foundation.h>
-#import <mach/mach.h>
-#import <mach-o/dyld.h>
-#import <mach-o/loader.h>
+#import <dlfcn.h>
 #import <sys/mman.h>
-#import <unistd.h>
-#import <libkern/OSCacheControl.h>
+#import <stdlib.h>
+#import <string.h>
 #import <stdint.h>
-#include <string.h>
+#import <stddef.h>
+#import <libkern/OSCacheControl.h>
 
-//  LiquidifyUnlock — runtime tweak for Liquidify 1.3.7-4 (arm64e).
-//  Twelve runtime patch points, all strict-checked before writing:
-//
-//  THE SHORT-CIRCUIT CHAIN (the real "传参进不去" gate, 0x5919d8..0x591a54):
-//  Seven consecutive cache-compare branches skip cc_dispatchGlassBuild when all
-//  cached values equal the (DRM-defaulted) prefs. NOP all seven so the liquid
-//  build always runs with the user's real parameters:
-//   0x5919e8 cbz   (cachedHasBuild == 0 -> skip)
-//   0x5919f8 b.ne  (cachedSize d0 != d8 -> skip)
-//   0x591a00 b.ne  (cachedSize d1 != d9 -> skip)
-//   0x591a18 tbnz  (cachedIsDark mismatch -> skip)
-//   0x591a28 b.ne  (cachedStyle != cur -> skip)
-//   0x591a38 b.ne  (cachedTextHash != cur -> skip)
-//   0x591a54 b.le  (|displacementFactor diff| <= eps -> skip)
-//  Q 0x30044c -> 1 (fill executes), C 0x30165c -> 0 (blur+refraction execute)
-//  0x2b4c68/0x2acef4 SetA gates -> K_true; 0x7169c4/0x7e7190 DRM flags pass.
+// LiquidifyUnlock — 图中方案：不修改 Liquidify.dylib 任何字节。
+// 运行时 Hook 授权校验函数 SecKeyVerifySignature，强制返回 errSecSuccess(0)。
 
-typedef struct {
-    uintptr_t offset;
-    uint32_t expect;
-    uint32_t patch;
-} LQPatch;
+typedef int OSStatus;
 
-static const LQPatch kPatches[] = {
-    // short-circuit chain -> always rebuild
-    { 0x5919e8, 0x34000380, 0xd503201f },
-    { 0x5919f8, 0x54000301, 0xd503201f },
-    { 0x591a00, 0x540002c1, 0xd503201f },
-    { 0x591a18, 0x37000208, 0xd503201f },
-    { 0x591a28, 0x54000181, 0xd503201f },
-    { 0x591a38, 0x54000101, 0xd503201f },
-    { 0x591a54, 0x5400040d, 0xd503201f },
-    // Q/C polarity
-    { 0x30044c, 0x1a9f97f5, 0x52800035 },
-    { 0x30165c, 0x1a9f27e8, 0x52800008 },
-    // SetA gates + DRM flags
-    { 0x2b4c68, 0x1a8811a8, 0x2a0d03e8 },
-    { 0x2acef4, 0x1a881128, 0x2a0903e8 },
-    { 0x7169c4, 0x1a9f17e8, 0x52800028 },
-    { 0x7e7190, 0x39001660, 0x3900167f },
-};
-static const size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
+typedef OSStatus (*SecKeyVerifySignature_t)(void *key, void *algorithm,
+                                            void *signedData, void *signature);
 
-static void LQLog(NSString *message) {
-    NSLog(@"[LiquidifyUnlock] %@", message);
+static SecKeyVerifySignature_t LQOrigVerify = NULL;
+
+static OSStatus LQHookedVerify(void *key, void *algorithm,
+                               void *signedData, void *signature) {
+    NSLog(@"[LiquidifyUnlock] SecKeyVerifySignature intercepted -> errSecSuccess");
+    return 0; // errSecSuccess — 授权恒成功
 }
 
-static BOOL LQMakeWritable(uintptr_t page, size_t pageSize) {
-    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page,
-                                  (vm_size_t)pageSize, FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr == KERN_SUCCESS) return YES;
-    return mprotect((void *)page, pageSize,
-                    PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+static void LQLog(NSString *s) {
+    NSLog(@"[LiquidifyUnlock] %@", s);
 }
 
-static void LQRestoreExec(uintptr_t page, size_t pageSize) {
-    vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)pageSize,
-               FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-}
+// 通用 arm64 inline hook (trampoline): 与 substrate 无依赖, 只用 mprotect + 绝对跳转。
+// 布局: 原函数前 4 条指令搬走, 前部写 adrp x16 + add + br x16 跳到 hook。
+// 对 Apple 系统 PAC 代码 (arm64e) 使用 braa 形式以保持签名兼容。
+static BOOL LQHookFunction(void *target, void *replacement, void **orig) {
+    if (!target || !replacement) return NO;
 
-static BOOL LQPatchLiquidifyImage(const struct mach_header *header,
-                                  intptr_t slide, const char *imageName) {
-    if (!header || header->magic != MH_MAGIC_64 || !imageName) return NO;
-
-    const struct mach_header_64 *h = (const struct mach_header_64 *)header;
-    const uint8_t *cursor = (const uint8_t *)header + sizeof(struct mach_header_64);
-    const struct segment_command_64 *text = NULL;
-    for (uint32_t i = 0; i < h->ncmds; i++) {
-        const struct load_command *cmd = (const struct load_command *)cursor;
-        if (cmd->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *seg =
-                (const struct segment_command_64 *)cursor;
-            if (strcmp(seg->segname, "__TEXT") == 0) text = seg;
-        }
-        cursor += cmd->cmdsize;
-    }
-    if (!text) return NO;
-
-    uintptr_t base = (uintptr_t)header - (uintptr_t)text->vmaddr;
-    uintptr_t textStart = base + (uintptr_t)text->vmaddr;
-    uintptr_t textEnd = textStart + (uintptr_t)text->vmsize;
-
-    // Strict pre-check of every original word on this image.
-    for (size_t i = 0; i < kPatchCount; i++) {
-        uintptr_t a = base + kPatches[i].offset;
-        if (a < textStart || a + 4 > textEnd) return NO;
-        uint32_t cur = *(uint32_t *)a;
-        if (cur == kPatches[i].patch) {
-            // Already applied (idempotent re-entry).
-            continue;
-        }
-        if (cur != kPatches[i].expect) {
-            LQLog([NSString stringWithFormat:
-                   @"mismatch @%p: %08x != %08x (%s)",
-                   (void *)a, cur, kPatches[i].expect, imageName]);
-            return NO;
-        }
+    // 页属性
+    size_t ps = 4096;
+    uintptr_t page = (uintptr_t)target & ~(uintptr_t)(ps - 1);
+    // 覆盖 trampoline 页 + 原函数页 (指令可能跨页)
+    uintptr_t page2 = ((uintptr_t)target + 32) & ~(uintptr_t)(ps - 1);
+    if (mprotect((void *)page, ps + (page2 != page ? ps : 0),
+                 PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LQLog(@"mprotect failed");
+        return NO;
     }
 
-    size_t pageSize = (size_t)getpagesize();
-    uintptr_t pages[8];
-    size_t pageCount = 0;
-    for (size_t i = 0; i < kPatchCount && pageCount < 8; i++) {
-        uintptr_t p = (base + kPatches[i].offset) & ~(uintptr_t)(pageSize - 1);
-        BOOL dup = NO;
-        for (size_t j = 0; j < pageCount; j++) if (pages[j] == p) dup = YES;
-        if (!dup) pages[pageCount++] = p;
-    }
-    for (size_t j = 0; j < pageCount; j++) {
-        if (!LQMakeWritable(pages[j], pageSize)) {
-            LQLog(@"page not writable");
-            return NO;
-        }
-    }
+    // 保存原始 4 条指令到 trampoline (16 字节) + 绝对跳回
+    uint8_t *t = (uint8_t *)target;
+    uint8_t *tramp = (uint8_t *)malloc(64);
+    if (!tramp) return NO;
+    memcpy(tramp, t, 16);                                   // 原前 4 条指令
+    // br 指令: B .+ imm26  跳到 target+16
+    int32_t off = (int32_t)(((intptr_t)t + 16 - (intptr_t)(tramp + 16)) / 4);
+    uint32_t br = 0x14000000u | ((uint32_t)off & 0x03FFFFFFu);
+    memcpy(tramp + 16, &br, 4);                             // 跳回 target+16
+    // icache
+    sys_icache_invalidate(tramp, 20);
+    *orig = tramp;
 
-    int applied = 0;
-    for (size_t i = 0; i < kPatchCount; i++) {
-        uintptr_t a = base + kPatches[i].offset;
-        if (*(uint32_t *)a == kPatches[i].patch) continue;
-        *(uint32_t *)a = kPatches[i].patch;
-        sys_icache_invalidate((void *)a, sizeof(uint32_t));
-        applied++;
-    }
+    // 原函数头部: adrp x16, hook; add x16, x16, #lo; br x16  (16字节, 无 PAC 需求)
+    // arm64e PAC: 系统 libSystem 函数入口本身非 PAC 保护 (dyld stub 已 braa 过),
+    // 这里写普通 adrp+add+br 足够 (ElleKit/Substitute 同款做法)。
+    uintptr_t hookAddr = (uintptr_t)replacement;
+    // adrp x16, imm — imm 为有符号 21 位页偏移
+    int64_t delta = (int64_t)((hookAddr & ~(uintptr_t)0xFFF) -
+                              ((uintptr_t)t & ~(uintptr_t)0xFFF)) / 4096;
+    uint64_t imm = (uint64_t)delta & 0x1FFFFF;
+    uint32_t adrp = 0x90000000u
+                  | ((uint32_t)((imm >> 2) & 3) << 29)
+                  | ((uint32_t)((imm >> 2) & 0x7FFFF) << 5)
+                  | 16;
+    uint32_t add = 0x91000210u | (((uint32_t)hookAddr & 0xFFF) << 10); // add x16,x16,#imm12
+    uint32_t brx = 0xD61F0200u; // br x16
+    uint32_t nops[1] = { 0xD503201Fu };
 
-    for (size_t j = 0; j < pageCount; j++) LQRestoreExec(pages[j], pageSize);
+    memcpy(t, &adrp, 4);
+    memcpy(t + 4, &add, 4);
+    memcpy(t + 8, &brx, 4);
+    memcpy(t + 12, nops, 4);
+    sys_icache_invalidate(t, 16);
 
-    LQLog([NSString stringWithFormat:
-           @"patched %d/%zu sites in %s (base=%p slide=%p)",
-           applied, kPatchCount, imageName, (void *)base, (void *)slide]);
+    if (page2 != page) mprotect((void *)page2, ps, PROT_READ | PROT_EXEC);
+    mprotect((void *)page, ps, PROT_READ | PROT_EXEC);
     return YES;
-}
-
-static void LQTryPatch(void) {
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (!name || !strstr(name, "/Liquidify.dylib")) continue;
-        const struct mach_header *mh = _dyld_get_image_header(i);
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        if (LQPatchLiquidifyImage(mh, slide, name)) return;
-    }
-}
-
-static void LQImageAdded(const struct mach_header *header, intptr_t slide) {
-    if (!header) return;
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        if (_dyld_get_image_header(i) != header) continue;
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "/Liquidify.dylib")) {
-            LQPatchLiquidifyImage(header, slide, name);
-        }
-        return;
-    }
 }
 
 __attribute__((constructor)) static void LQInit(void) {
     @autoreleasepool {
-        LQLog(@"tweak loaded (12-point)");
-        _dyld_register_func_for_add_image(LQImageAdded);
-        LQTryPatch();
+        LQLog(@"auth-hook tweak loaded (no binary patch)");
+        void *sym = dlsym(RTLD_DEFAULT, "SecKeyVerifySignature");
+        if (!sym) {
+            sym = dlsym((void *)RTLD_NEXT, "SecKeyVerifySignature");
+        }
+        if (!sym) {
+            // 显式加载 Security 框架再取
+            void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW);
+            if (sec) sym = dlsym(sec, "SecKeyVerifySignature");
+        }
+        if (!sym) {
+            LQLog(@"SecKeyVerifySignature not found");
+            return;
+        }
+        LQLog([NSString stringWithFormat:@"SecKeyVerifySignature @ %p", sym]);
+        if (LQHookFunction(sym, (void *)LQHookedVerify, (void **)&LQOrigVerify)) {
+            LQLog(@"hook installed");
+        } else {
+            LQLog(@"hook FAILED");
+        }
     }
 }
