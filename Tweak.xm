@@ -4,6 +4,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <fcntl.h>
+#include <mach-o/dyld.h>
 #import <stdarg.h>
 #import <stdlib.h>
 #import <unistd.h>
