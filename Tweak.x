@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <sys/mman.h>
+#import <mach/mach.h>
 #import <stdlib.h>
 #import <string.h>
 #import <stdint.h>
@@ -30,17 +31,30 @@ static void LQLog(NSString *s) {
 // 通用 arm64 inline hook (trampoline): 与 substrate 无依赖, 只用 mprotect + 绝对跳转。
 // 布局: 原函数前 4 条指令搬走, 前部写 adrp x16 + add + br x16 跳到 hook。
 // 对 Apple 系统 PAC 代码 (arm64e) 使用 braa 形式以保持签名兼容。
+static BOOL LQMakeCodeWritable(uintptr_t addr, size_t len) {
+    // iOS: __TEXT 页需要 vm_protect + VM_PROT_COPY (COW); mprotect 会 EPERM。
+    kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)addr,
+                                  (vm_size_t)len, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr == KERN_SUCCESS) return YES;
+    // 兜底
+    return mprotect((void *)addr, len, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+}
+
+static void LQMakeCodeExec(uintptr_t addr, size_t len) {
+    vm_protect(mach_task_self(), (vm_address_t)addr, (vm_size_t)len, FALSE,
+               VM_PROT_READ | VM_PROT_EXECUTE);
+}
+
 static BOOL LQHookFunction(void *target, void *replacement, void **orig) {
     if (!target || !replacement) return NO;
 
-    // 页属性
     size_t ps = 4096;
     uintptr_t page = (uintptr_t)target & ~(uintptr_t)(ps - 1);
-    // 覆盖 trampoline 页 + 原函数页 (指令可能跨页)
     uintptr_t page2 = ((uintptr_t)target + 32) & ~(uintptr_t)(ps - 1);
-    if (mprotect((void *)page, ps + (page2 != page ? ps : 0),
-                 PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LQLog(@"mprotect failed");
+    size_t cover = ps + (page2 != page ? ps : 0);
+    if (!LQMakeCodeWritable(page, cover)) {
+        LQLog(@"vm_protect failed");
         return NO;
     }
 
@@ -79,8 +93,8 @@ static BOOL LQHookFunction(void *target, void *replacement, void **orig) {
     memcpy(t + 12, nops, 4);
     sys_icache_invalidate(t, 16);
 
-    if (page2 != page) mprotect((void *)page2, ps, PROT_READ | PROT_EXEC);
-    mprotect((void *)page, ps, PROT_READ | PROT_EXEC);
+    if (page2 != page) LQMakeCodeExec(page2, ps);
+    LQMakeCodeExec(page, ps);
     return YES;
 }
 
