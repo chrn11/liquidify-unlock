@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+extern "C" Ivar *class_copyIvarList(Class cls, unsigned int *outCount);
+
 
 // LiquidifyUnlock QC — 用户思路的最终形态:
 // Q 点 (cc_applyGlassFillAppearance) 和 C 点 (cc_applyGlassRefractionStrength/cc_applyBackdropBlurRadius)
@@ -23,10 +25,10 @@ static double LQPrefDouble(NSString *key, double fallback) {
 - (void)cc_applyGlassFillAppearance {
     // ivar 扫描: 把 self 内 0.0 的 double ivar 全部补成有效值
     // (0x3d0 = frosted opacity, 通过运行时偏移探测 + 全量兜底)
-    unsigned long count = 0;
+    unsigned int count = 0;
     Ivar *ivars = class_copyIvarList(object_getClass(self), &count);
     double opacity = LQPrefDouble(@"LiquidifyFrostedGlassOpacity", 0.85);
-    for (unsigned long i = 0; i < count; i++) {
+    for (unsigned int i = 0; i < count; i++) {
         const char *type = ivar_getTypeEncoding(ivars[i]);
         if (type && type[0] == 'd') {
             ptrdiff_t off = (ptrdiff_t)ivar_getOffset(ivars[i]);
@@ -42,10 +44,10 @@ static double LQPrefDouble(NSString *key, double fallback) {
 
 // C 点: 折射强度 — 同样把 0 值强度/半径 ivar 补上
 - (void)cc_applyGlassRefractionStrength {
-    unsigned long count = 0;
+    unsigned int count = 0;
     Ivar *ivars = class_copyIvarList(object_getClass(self), &count);
     double strength = LQPrefDouble(@"LiquidifyGlassRefractionStrength", 20.0);
-    for (unsigned long i = 0; i < count; i++) {
+    for (unsigned int i = 0; i < count; i++) {
         const char *type = ivar_getTypeEncoding(ivars[i]);
         if (type && type[0] == 'd') {
             ptrdiff_t off = (ptrdiff_t)ivar_getOffset(ivars[i]);
@@ -60,10 +62,10 @@ static double LQPrefDouble(NSString *key, double fallback) {
 }
 
 - (void)cc_applyBackdropBlurRadius {
-    unsigned long count = 0;
+    unsigned int count = 0;
     Ivar *ivars = class_copyIvarList(object_getClass(self), &count);
     double radius = LQPrefDouble(@"LiquidifyGlassBlurRadius", 5.0);
-    for (unsigned long i = 0; i < count; i++) {
+    for (unsigned int i = 0; i < count; i++) {
         const char *type = ivar_getTypeEncoding(ivars[i]);
         if (type && type[0] == 'd') {
             ptrdiff_t off = (ptrdiff_t)ivar_getOffset(ivars[i]);
