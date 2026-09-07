@@ -8,7 +8,7 @@ PACKAGE_NAME = com.minis.liquidifyunlock
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = LiquidifyUnlock
-LiquidifyUnlock_FILES = Tweak.x
+LiquidifyUnlock_FILES = Tweak.xm
 LiquidifyUnlock_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 LiquidifyUnlock_FRAMEWORKS = Foundation
 
