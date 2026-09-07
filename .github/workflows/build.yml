@@ -10,39 +10,67 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Theos (roothide fork)
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg ldid xz-utils fakeroot
+
+      - name: Stage full-crack package (roothide native)
         run: |
           set -euo pipefail
-          export THEOS="$HOME/theos"
-          if [[ ! -d "$THEOS" ]]; then
-            git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
-          fi
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          STG="$PWD/staging"
+          mkdir -p "$STG/DEBIAN" \
+                   "$STG/var/jb/Library/MobileSubstrate/DynamicLibraries"
+          cp assets/*.dylib assets/*.plist \
+             "$STG/var/jb/Library/MobileSubstrate/DynamicLibraries/"
 
-      - name: Install deps
-        run: |
-          brew install dpkg ldid
+          cat > "$STG/DEBIAN/control" <<'EOF'
+          Package: com.charlieleung.liquidify
+          Name: Liquidify
+          Version: 1.3.7-77~roothide
+          Architecture: iphoneos-arm64
+          Description: Liquidify full crack (roothide native, arm64e)
+          Maintainer: Charlie Leung
+          Author: Charlie Leung
+          Section: Tweaks
+          Depends: mobilesubstrate (>= 0.9.5000)
+          Installed-Size: 38700
+          EOF
 
-      - name: Build roothide deb
+          LIBDIR="$STG/var/jb/Library/MobileSubstrate/DynamicLibraries"
+          ln -sf "Liquidify.dylib"           "$LIBDIR/Liquidify.dylib.roothidepatch"
+          ln -sf "LiquidifyGlassFix.dylib"   "$LIBDIR/LiquidifyGlassFix.dylib.roothidepatch"
+          ln -sf "LiquidGlassKeyboard.dylib" "$LIBDIR/LiquidGlassKeyboard.dylib.roothidepatch"
+
+      - name: Build deb
         run: |
           set -euo pipefail
-          make clean package FINALPACKAGE=1 \
-            THEOS_PACKAGE_SCHEME=roothide \
-            PACKAGE_VERSION=2.1.0-${{ github.run_number }}
+          mkdir -p packages
+          fakeroot dpkg-deb -Zxz --root-owner-group -b staging \
+            packages/liquidify_1.3.7-77_roothide.deb
+          ls -lh packages/
 
-      - name: Collect
+      - name: Verify
         run: |
-          mkdir -p output
-          cp packages/*.deb output/ || cp .theos/packages/*.deb output/ 2>/dev/null || find . -name "*.deb" -exec cp {} output/ \;
-          ls -lh output/
+          set -euo pipefail
+          dpkg-deb --info packages/*.deb | head -14
+          dpkg-deb -c packages/*.deb | grep -E "roothidepatch|\.dylib"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LiquidifyUnlock-roothide-deb
-          path: output/*.deb
+          name: liquidify-roothide-deb
+          path: packages/*.deb
           retention-days: 30
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.3.7-77-roothide
+          files: packages/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
