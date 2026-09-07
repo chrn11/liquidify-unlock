@@ -8,36 +8,46 @@
 #import <stdint.h>
 #include <string.h>
 
-// LiquidifyUnlock — runtime tweak for Liquidify 1.3.7-4 (arm64e).
-// Disk file is never modified. Seven runtime patch points, all strict-checked:
+//  LiquidifyUnlock — runtime tweak for Liquidify 1.3.7-4 (arm64e).
+//  Twelve runtime patch points, all strict-checked before writing:
 //
-//  Q 0x30044c cset w21,hi -> mov w21,#1   Q==1 -> block 0x3003f4 runs cc_applyGlassFillAppearance (x2)
-//  C 0x30165c cset w8, lo -> mov w8, #0   C==0 -> block 0x301678 runs blur + refraction
-//  0x2b4c68  csel w8,w13,w8,ne -> orr w8,wzr,w13  SetA fill gate -> K_true
-//  0x2acef4  csel w8,w9, w8,ne -> orr w8,wzr,w9   SetA refr gate -> K_true
-//  0x7169c4  cset w8,eq -> mov w8,#1      DRM1: signature-verified flag true
-//  0x7e7190  strb w0,[x19,#5] -> strb wzr,[x19,#5] DRM2: OSStatus 0 (success)
-//  0x591a54  b.le -> nop                  Label gate: never skip cc_dispatchGlassBuild
-//
-// Runtime tweak safety: each site is verified against the original word before
-// writing, applied per-process with icache invalidation, and worst case is a
-// watchdog kill of one render process — unlike the on-disk binary patch that
-// previously hard-bricked SpringBoard at boot.
+//  THE SHORT-CIRCUIT CHAIN (the real "传参进不去" gate, 0x5919d8..0x591a54):
+//  Seven consecutive cache-compare branches skip cc_dispatchGlassBuild when all
+//  cached values equal the (DRM-defaulted) prefs. NOP all seven so the liquid
+//  build always runs with the user's real parameters:
+//   0x5919e8 cbz   (cachedHasBuild == 0 -> skip)
+//   0x5919f8 b.ne  (cachedSize d0 != d8 -> skip)
+//   0x591a00 b.ne  (cachedSize d1 != d9 -> skip)
+//   0x591a18 tbnz  (cachedIsDark mismatch -> skip)
+//   0x591a28 b.ne  (cachedStyle != cur -> skip)
+//   0x591a38 b.ne  (cachedTextHash != cur -> skip)
+//   0x591a54 b.le  (|displacementFactor diff| <= eps -> skip)
+//  Q 0x30044c -> 1 (fill executes), C 0x30165c -> 0 (blur+refraction execute)
+//  0x2b4c68/0x2acef4 SetA gates -> K_true; 0x7169c4/0x7e7190 DRM flags pass.
 
 typedef struct {
     uintptr_t offset;
-    uint32_t expect;   // original instruction word, strict check
-    uint32_t patch;    // replacement word
+    uint32_t expect;
+    uint32_t patch;
 } LQPatch;
 
 static const LQPatch kPatches[] = {
-    { 0x30044c, 0x1a9f97f5, 0x52800035 }, // Q -> 1 (mov w21,#1)
-    { 0x30165c, 0x1a9f27e8, 0x52800008 }, // C -> 0 (mov w8,#0)
+    // short-circuit chain -> always rebuild
+    { 0x5919e8, 0x34000380, 0xd503201f },
+    { 0x5919f8, 0x54000301, 0xd503201f },
+    { 0x591a00, 0x540002c1, 0xd503201f },
+    { 0x591a18, 0x37000208, 0xd503201f },
+    { 0x591a28, 0x54000181, 0xd503201f },
+    { 0x591a38, 0x54000101, 0xd503201f },
+    { 0x591a54, 0x5400040d, 0xd503201f },
+    // Q/C polarity
+    { 0x30044c, 0x1a9f97f5, 0x52800035 },
+    { 0x30165c, 0x1a9f27e8, 0x52800008 },
+    // SetA gates + DRM flags
     { 0x2b4c68, 0x1a8811a8, 0x2a0d03e8 },
     { 0x2acef4, 0x1a881128, 0x2a0903e8 },
     { 0x7169c4, 0x1a9f17e8, 0x52800028 },
     { 0x7e7190, 0x39001660, 0x3900167f },
-    { 0x591a54, 0x5400040d, 0xd503201f },
 };
 static const size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
@@ -157,7 +167,7 @@ static void LQImageAdded(const struct mach_header *header, intptr_t slide) {
 
 __attribute__((constructor)) static void LQInit(void) {
     @autoreleasepool {
-        LQLog(@"tweak loaded (7-point)");
+        LQLog(@"tweak loaded (12-point)");
         _dyld_register_func_for_add_image(LQImageAdded);
         LQTryPatch();
     }
