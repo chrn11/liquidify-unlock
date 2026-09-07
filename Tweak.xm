@@ -2,15 +2,48 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <fcntl.h>
-extern "C" Ivar *class_copyIvarList(Class cls, unsigned int *outCount);
 
-
-// LiquidifyUnlock QC — 用户思路的最终形态:
-// Q 点 (cc_applyGlassFillAppearance) 和 C 点 (cc_applyGlassRefractionStrength/cc_applyBackdropBlurRadius)
-// 执行液态转换, 但 "传参进不去" (ivar 里的强度/模糊值全 0) → 渲染成透明.
-// 本 tweak hook 这两个方法, 在原实现运行前把 self 的参数 ivar 强制写为有效值
-// (来自用户设置的真实偏好: 强度 20 / 模糊 5 / 不透明度 0.85).
-// 磁盘零修改, 与 GlassFix 共存.
+static int LQReportCount = 0;
+static void LQReport(const char *tag, Class cls, id selfObj) {
+    if (cls && ++LQReportCount > 30) return;
+    int fd = open("/var/mobile/Documents/lq_verify.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
+    if (fd < 0) return;
+    char buf[512];
+    if (cls && selfObj) {
+        int n = snprintf(buf, sizeof(buf), "[%s] class=%s\n", tag, class_getName(cls));
+        write(fd, buf, n);
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            const char *name = ivar_getName(ivars[i]);
+            ptrdiff_t off = (ptrdiff_t)ivar_getOffset(ivars[i]);
+            void *base = (__bridge void *)selfObj;
+            if (type && type[0] == 'd') {
+                double v = *(double *)((char *)base + off);
+                n = snprintf(buf, sizeof(buf), "  d %s +%td = %f\n", name ? name : "?", off, v);
+                write(fd, buf, n);
+            } else if (type && type[0] == 'B') {
+                BOOL v = *(BOOL *)((char *)base + off);
+                n = snprintf(buf, sizeof(buf), "  B %s +%td = %d\n", name ? name : "?", off, (int)v);
+                write(fd, buf, n);
+            } else if (type && type[0] == 'f') {
+                float v = *(float *)((char *)base + off);
+                n = snprintf(buf, sizeof(buf), "  f %s +%td = %f\n", name ? name : "?", off, v);
+                write(fd, buf, n);
+            } else if (type && type[0] == 'i') {
+                int v = *(int *)((char *)base + off);
+                n = snprintf(buf, sizeof(buf), "  i %s +%td = %d\n", name ? name : "?", off, v);
+                write(fd, buf, n);
+            }
+        }
+        if (ivars) free(ivars);
+    } else {
+        int n = snprintf(buf, sizeof(buf), "[ctor] tweak loaded\n");
+        write(fd, buf, n);
+    }
+    close(fd);
+}
 
 static double LQPrefDouble(NSString *key, double fallback) {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:
@@ -84,45 +117,6 @@ static double LQPrefDouble(NSString *key, double fallback) {
 }
 
 %end
-
-static int LQReportCount = 0;
-static void LQReport(const char *tag, Class cls, id selfObj) {
-    if (cls && ++LQReportCount > 30) return; // 前30次调用记录, 之后静默
-
-    // 低级写文件 (绕过 NSString 静默失败)
-    int fd = open("/var/mobile/Documents/lq_verify.txt", O_WRONLY|O_CREAT|O_APPEND, 0644);
-    if (fd < 0) return;
-    char buf[512];
-    if (cls && selfObj) {
-        int n = snprintf(buf, sizeof(buf), "[%s] %@ ivars:\n", tag, NSStringFromClass(cls));
-        write(fd, buf, n);
-        unsigned int count = 0;
-        Ivar *ivars = class_copyIvarList(cls, &count);
-        for (unsigned int i = 0; i < count; i++) {
-            const char *type = ivar_getTypeEncoding(ivars[i]);
-            const char *name = ivar_getName(ivars[i]);
-            ptrdiff_t off = (ptrdiff_t)ivar_getOffset(ivars[i]);
-            if (type && type[0] == 'd') {
-                double v = *(double *)((uint8_t *)(__bridge void *)selfObj + off);
-                n = snprintf(buf, sizeof(buf), "  d %s +%td = %f\n", name ? name : "?", off, v);
-                write(fd, buf, n);
-            } else if (type && type[0] == 'B') {
-                BOOL v = *(BOOL *)((uint8_t *)(__bridge void *)selfObj + off);
-                n = snprintf(buf, sizeof(buf), "  B %s +%td = %d\n", name ? name : "?", off, v);
-                write(fd, buf, n);
-            } else if (type && type[0] == '@') {
-                id v = *(id *)((uint8_t *)(__bridge void *)selfObj + off);
-                n = snprintf(buf, sizeof(buf), "  @ %s +%td = %@\n", name ? name : "?", off, v ? NSStringFromClass([v class]) : @"nil");
-                write(fd, buf, n);
-            }
-        }
-        if (ivars) free(ivars);
-    } else {
-        int n = snprintf(buf, sizeof(buf), "[%s] loaded\n", tag);
-        write(fd, buf, n);
-    }
-    close(fd);
-}
 
 %ctor {
     @autoreleasepool {
