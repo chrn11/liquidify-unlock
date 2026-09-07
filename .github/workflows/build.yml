@@ -31,8 +31,8 @@ jobs:
           cat > "$STG/DEBIAN/control" <<'EOF'
           Package: com.charlieleung.liquidify
           Name: Liquidify
-          Version: 1.3.7-78~roothide
-          Architecture: iphoneos-arm64
+          Version: 1.3.7-79~roothide
+          Architecture: iphoneos-arm64e
           Description: Liquidify full crack (roothide native, arm64e)
           Maintainer: Charlie Leung
           Author: Charlie Leung
@@ -51,7 +51,7 @@ jobs:
           set -euo pipefail
           mkdir -p packages
           fakeroot dpkg-deb -Zxz --root-owner-group -b staging \
-            packages/liquidify_1.3.7-78_roothide.deb
+            packages/liquidify_1.3.7-79_roothide.deb
           ls -lh packages/
 
       - name: Verify
@@ -70,7 +70,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.3.7-78-roothide
+          tag_name: v1.3.7-79-roothide
           files: packages/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
