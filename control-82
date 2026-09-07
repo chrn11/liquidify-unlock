@@ -1,0 +1,10 @@
+Package: com.charlieleung.liquidify
+Name: Liquidify
+Version: 1.3.7-82~roothide
+Architecture: iphoneos-arm64e
+Description: Liquidify full crack (roothide native, arm64e)
+Maintainer: Charlie Leung
+Author: Charlie Leung
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
+Installed-Size: 40120
